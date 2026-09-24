@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<customUI xmlns="http://schemas.microsoft.com/office/2009/07/customui" onLoad="Ribbon_Load" loadImage="LoadImage">
+  <ribbon>
+    <tabs>
+      <tab id="olTab" label="OrthoLink">
+        <group id="olGroupMain" label="圆角连接线">
+          <button id="olConnect" label="连接" size="large" image="icon32"
+                  onAction="OnConnect"
+                  screentip="生成圆角连接线"
+                  supertip="先选中起点形状，再按住 Ctrl 选中终点形状，然后点击。会生成一条带圆角的直角连接线，中间的黄色小点可以拖动。"/>
+          <button id="olReroute" label="重新布线" size="large" imageMso="Redo"
+                  onAction="OnReroute"
+                  screentip="重新布线"
+                  supertip="对选中的连接线重新自动选择出入边，并把中间段放回正中。会清掉手动指定的连接点。"/>
+          <box id="olBoxMain" boxStyle="vertical">
+            <button id="olUpdateAll" label="更新本页" imageMso="Refresh"
+                    onAction="OnUpdateAll"
+                    screentip="更新本页所有连接线"
+                    supertip="让本页所有连接线重新贴合它们两端的形状。开启“自动跟随”后一般不需要手动点。"/>
+            <toggleButton id="olAutoFollow" label="自动跟随" imageMso="AutoCorrect"
+                          onAction="OnAutoFollow" getPressed="GetAutoFollow"
+                          screentip="自动跟随"
+                          supertip="移动或缩放形状后，连接线自动跟着走；拖动连接线端点到形状上会自动吸附。"/>
+          </box>
+        </group>
+        <group id="olGroupSelected" label="选中的连接线">
+          <box id="olBoxPorts" boxStyle="vertical">
+            <dropDown id="olSrcSide" label="起点" sizeString="99.9 pt" onAction="OnSrcSide" getSelectedItemIndex="GetSrcSide" getEnabled="GetHasLink"
+                      screentip="起点从哪条边出" supertip="选“自动”由插件按两个形状的相对位置决定。也可以直接拖动连接线的端点到形状边上，会自动吸附并记住位置。">
+              <item id="olS0" label="自动"/>
+              <item id="olS1" label="左边"/>
+              <item id="olS2" label="右边"/>
+              <item id="olS3" label="上边"/>
+              <item id="olS4" label="下边"/>
+            </dropDown>
+            <dropDown id="olDstSide" label="终点" sizeString="99.9 pt" onAction="OnDstSide" getSelectedItemIndex="GetDstSide" getEnabled="GetHasLink"
+                      screentip="终点从哪条边进" supertip="选“自动”由插件按两个形状的相对位置决定。也可以直接拖动连接线的端点到形状边上，会自动吸附并记住位置。">
+              <item id="olD0" label="自动"/>
+              <item id="olD1" label="左边"/>
+              <item id="olD2" label="右边"/>
+              <item id="olD3" label="上边"/>
+              <item id="olD4" label="下边"/>
+            </dropDown>
+          </box>
+          <separator id="olSep1"/>
+          <box id="olBoxStyle" boxStyle="vertical">
+            <comboBox id="olRadius" label="圆角" sizeString="99.9 pt" getText="GetRadiusText" onChange="OnRadiusChange" getEnabled="GetHasLink"
+                      screentip="选中连接线的圆角" supertip="只改当前选中的连接线。可以从列表里选，也可以直接输入数字（单位 pt），0 表示直角。">
+              <item id="olR0" label="0"/>
+              <item id="olR4" label="4"/>
+              <item id="olR6" label="6"/>
+              <item id="olR8" label="8"/>
+              <item id="olR12" label="12"/>
+              <item id="olR16" label="16"/>
+              <item id="olR24" label="24"/>
+            </comboBox>
+            <comboBox id="olGap" label="间距" sizeString="99.9 pt" getText="GetGapText" onChange="OnGapChange" getEnabled="GetHasLink"
+                      screentip="端点与形状的距离" supertip="连接线两端离形状边缘多远。0 表示贴合。只改当前选中的连接线。">
+              <item id="olG0" label="0"/>
+              <item id="olG2" label="2"/>
+              <item id="olG4" label="4"/>
+              <item id="olG6" label="6"/>
+              <item id="olG8" label="8"/>
+              <item id="olG12" label="12"/>
+            </comboBox>
+          </box>
+          <separator id="olSep2"/>
+          <box id="olBoxArrows" boxStyle="vertical">
+            <toggleButton id="olArrowEnd" label="终点箭头" imageMso="ShapeRightArrow"
+                          onAction="OnArrowEnd" getPressed="GetArrowEnd"/>
+            <toggleButton id="olArrowStart" label="起点箭头" imageMso="ShapeLeftArrow"
+                          onAction="OnArrowStart" getPressed="GetArrowStart"/>
+          </box>
+        </group>
+        <group id="olGroupDefaults" label="新线默认值">
+          <box id="olBoxDefaults" boxStyle="vertical">
+            <comboBox id="olDefaultRadius" label="圆角" sizeString="99.9 pt" getText="GetDefaultRadiusText" onChange="OnDefaultRadiusChange"
+                      screentip="新建连接线的圆角" supertip="之后新建的连接线都用这个值。可以从列表里选，也可以直接输入数字（单位 pt），0 表示直角。不影响已有的线。">
+              <item id="olDR0" label="0"/>
+              <item id="olDR4" label="4"/>
+              <item id="olDR6" label="6"/>
+              <item id="olDR8" label="8"/>
+              <item id="olDR12" label="12"/>
+              <item id="olDR16" label="16"/>
+              <item id="olDR24" label="24"/>
+            </comboBox>
+            <comboBox id="olDefaultGap" label="间距" sizeString="99.9 pt" getText="GetDefaultGapText" onChange="OnDefaultGapChange"
+                      screentip="新建连接线的端点间距" supertip="之后新建的连接线两端离形状边缘多远。0 表示贴合。不影响已有的线。">
+              <item id="olDG0" label="0"/>
+              <item id="olDG2" label="2"/>
+              <item id="olDG4" label="4"/>
+              <item id="olDG6" label="6"/>
+              <item id="olDG8" label="8"/>
+              <item id="olDG12" label="12"/>
+            </comboBox>
+          </box>
+        </group>
+      </tab>
+    </tabs>
+  </ribbon>
+</customUI>
