@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
-using System.Windows.Forms;
+using System.IO;
+using System.Reflection;
+using System.Text;
 using Office = Microsoft.Office.Core;
 using PowerPoint = Microsoft.Office.Interop.PowerPoint;
 
@@ -30,10 +32,12 @@ namespace OrthoLink
         {
             if (!IsLink(s)) return null;
             var t = s.Tags;
+            int src, dst;
+            if (!int.TryParse(t["OL_SRC"], out src) || !int.TryParse(t["OL_DST"], out dst)) return null;   // tags only half written
             var l = new Link
             {
-                SrcId = int.Parse(t["OL_SRC"]),
-                DstId = int.Parse(t["OL_DST"]),
+                SrcId = src,
+                DstId = dst,
                 SrcSide = ParseSide(t["OL_SRC_SIDE"], Side.Right),
                 DstSide = ParseSide(t["OL_DST_SIDE"], Side.Left),
                 SrcPos = ParseF(t["OL_SRC_POS"], 0.5f),
@@ -50,7 +54,6 @@ namespace OrthoLink
         public void Write(PowerPoint.Shape s)
         {
             var t = s.Tags;
-            t.Add(TVer, "1");
             t.Add("OL_SRC", SrcId.ToString());
             t.Add("OL_DST", DstId.ToString());
             t.Add("OL_SRC_SIDE", SrcSide.ToString());
@@ -61,6 +64,7 @@ namespace OrthoLink
             t.Add("OL_DST_PIN", DstPin ? "1" : "0");
             t.Add("OL_GAP", Gap.ToString(System.Globalization.CultureInfo.InvariantCulture));
             t.Add("OL_TOPO", Topo);
+            t.Add(TVer, "1");   // last: a shape whose tags are still being written is not taken for a connector
         }
 
         private static Side ParseSide(string s, Side fallback)
@@ -80,6 +84,7 @@ namespace OrthoLink
     {
         public string Topo;
         public float[] Params;
+        public float Lo = float.NegativeInfinity, Hi = float.PositiveInfinity;   // where the middle of a 3-segment route may go
     }
 
     /// <summary>Pure geometry helpers, no COM.</summary>
@@ -157,10 +162,17 @@ namespace OrthoLink
 
             if (hs && hd)
             {
+                // facing boxes too close for the margin: the middle segment runs through the middle of the space between them
+                float between = es.X > 0 && ed.X > 0 ? rb.Left - ra.Right : es.X < 0 && ed.X < 0 ? ra.Left - rb.Right : float.PositiveInfinity;
+                if (between > 0 && between < 2 * m)
+                {
+                    float x = es.X > 0 ? ra.Right + between / 2 : ra.Left - between / 2;
+                    return new Route { Topo = "HVH", Params = new[] { x }, Lo = x, Hi = x };
+                }
                 float lo = float.NegativeInfinity, hi = float.PositiveInfinity;
                 if (es.X > 0) lo = Math.Max(lo, ra.Right + m); else hi = Math.Min(hi, ra.Left - m);
                 if (ed.X > 0) hi = Math.Min(hi, rb.Left - m); else lo = Math.Max(lo, rb.Right + m);
-                if (lo <= hi) return new Route { Topo = "HVH", Params = new[] { Clamp((pa.X + pb.X) / 2, lo, hi) } };
+                if (lo <= hi) return new Route { Topo = "HVH", Params = new[] { Clamp((pa.X + pb.X) / 2, lo, hi) }, Lo = lo, Hi = hi };
                 float x1 = es.X > 0 ? ra.Right + m : ra.Left - m;
                 float x2 = ed.X > 0 ? rb.Left - m : rb.Right + m;
                 float yTop = Math.Min(ra.Top, rb.Top) - m, yBot = Math.Max(ra.Bottom, rb.Bottom) + m;
@@ -169,10 +181,16 @@ namespace OrthoLink
             }
             if (!hs && !hd)
             {
+                float between = es.Y > 0 && ed.Y > 0 ? rb.Top - ra.Bottom : es.Y < 0 && ed.Y < 0 ? ra.Top - rb.Bottom : float.PositiveInfinity;
+                if (between > 0 && between < 2 * m)
+                {
+                    float y = es.Y > 0 ? ra.Bottom + between / 2 : ra.Top - between / 2;
+                    return new Route { Topo = "VHV", Params = new[] { y }, Lo = y, Hi = y };
+                }
                 float lo = float.NegativeInfinity, hi = float.PositiveInfinity;
                 if (es.Y > 0) lo = Math.Max(lo, ra.Bottom + m); else hi = Math.Min(hi, ra.Top - m);
                 if (ed.Y > 0) hi = Math.Min(hi, rb.Top - m); else lo = Math.Max(lo, rb.Bottom + m);
-                if (lo <= hi) return new Route { Topo = "VHV", Params = new[] { Clamp((pa.Y + pb.Y) / 2, lo, hi) } };
+                if (lo <= hi) return new Route { Topo = "VHV", Params = new[] { Clamp((pa.Y + pb.Y) / 2, lo, hi) }, Lo = lo, Hi = hi };
                 float y1 = es.Y > 0 ? ra.Bottom + m : ra.Top - m;
                 float y2 = ed.Y > 0 ? rb.Top - m : rb.Bottom + m;
                 float xL = Math.Min(ra.Left, rb.Left) - m, xR = Math.Max(ra.Right, rb.Right) + m;
@@ -232,8 +250,8 @@ namespace OrthoLink
         private const float SnapDistance = 40f; // how close (pt) a dragged end must land to a box to attach
 
         private readonly PowerPoint.Application _app;
-        private readonly string _templatePath;
-        private PowerPoint.Presentation _template;
+        private PowerPoint.Presentation _scratch;   // hidden deck where shapes are redrawn to sample their outlines
+        private readonly Dictionary<string, byte[]> _templates = new Dictionary<string, byte[]>();
 
         private sealed class Seen { public RectangleF Src, Dst, Conn; }
         private readonly Dictionary<int, Seen> _seen = new Dictionary<int, Seen>();
@@ -241,10 +259,9 @@ namespace OrthoLink
         private sealed class CachedOutline { public string Key; public Outline Outline; }
         private readonly Dictionary<int, CachedOutline> _outlines = new Dictionary<int, CachedOutline>();
 
-        public ConnectorService(PowerPoint.Application app, string templatePath)
+        public ConnectorService(PowerPoint.Application app)
         {
             _app = app;
-            _templatePath = templatePath;
         }
 
         // ------------------------------------------------------------------ public operations
@@ -316,33 +333,37 @@ namespace OrthoLink
 
         public static float GetGap(PowerPoint.Shape conn) { var l = Link.Read(conn); return l == null ? 0f : l.Gap; }
 
-        /// <summary>Called by the timer. Follows moved boxes, and re-attaches ends the user dragged.</summary>
+        /// <summary>Called after user input. Follows moved boxes, and re-attaches ends the user dragged.</summary>
         public int Follow(PowerPoint.Slide slide)
         {
             int n = 0;
             var map = IndexShapes(slide);
             foreach (var conn in LinksOn(slide))
             {
-                var link = Link.Read(conn);
-                PowerPoint.Shape src, dst;
-                if (link == null || !map.TryGetValue(link.SrcId, out src) || !map.TryGetValue(link.DstId, out dst)) continue;
-                var now = new Seen { Src = Rect(src), Dst = Rect(dst), Conn = Rect(conn) };
-                Seen before;
-                int id = conn.Id;
-                if (!_seen.TryGetValue(id, out before))
+                try
                 {
-                    _seen[id] = now;   // first sight: learn, don't touch (keeps undo history clean on file open)
-                    continue;
-                }
-                bool boxMoved = !Geo.Near(before.Src, now.Src) || !Geo.Near(before.Dst, now.Dst);
-                bool lineMoved = !Geo.Near(before.Conn, now.Conn);
-                if (!boxMoved && !lineMoved) continue;
+                    var link = Link.Read(conn);
+                    PowerPoint.Shape src, dst;
+                    if (link == null || !map.TryGetValue(link.SrcId, out src) || !map.TryGetValue(link.DstId, out dst)) continue;
+                    var now = new Seen { Src = Rect(src), Dst = Rect(dst), Conn = Rect(conn) };
+                    Seen before;
+                    int id = conn.Id;
+                    if (!_seen.TryGetValue(id, out before))
+                    {
+                        _seen[id] = now;   // first sight: learn, don't touch (keeps undo history clean on file open)
+                        continue;
+                    }
+                    bool boxMoved = !Geo.Near(before.Src, now.Src) || !Geo.Near(before.Dst, now.Dst);
+                    bool lineMoved = !Geo.Near(before.Conn, now.Conn);
+                    if (!boxMoved && !lineMoved) continue;
 
-                PowerPoint.Shape c2;
-                if (!boxMoved) c2 = ReAnchor(slide, conn, link, src, dst, before.Conn, map);
-                else c2 = UpdateCore(slide, conn, link, src, dst, false);
-                if (c2 != null && c2.Id != id) _seen.Remove(id);
-                n++;
+                    PowerPoint.Shape c2;
+                    if (!boxMoved) c2 = ReAnchor(slide, conn, link, src, dst, before.Conn, map);
+                    else c2 = UpdateCore(slide, conn, link, src, dst, false);
+                    if (c2 != null && c2.Id != id) _seen.Remove(id);
+                    n++;
+                }
+                catch (Exception ex) { Log.Error("Follow", ex); }   // one broken line must not hold up the others
             }
             return n;
         }
@@ -361,8 +382,9 @@ namespace OrthoLink
 
         public void Shutdown()
         {
-            try { if (_template != null) _template.Close(); } catch { }
-            _template = null;
+            try { if (_scratch != null) { _scratch.Saved = Office.MsoTriState.msoTrue; _scratch.Close(); } } catch { }
+            _scratch = null;
+            Clip.Shutdown();
         }
 
         // ------------------------------------------------------------------ internals
@@ -388,11 +410,14 @@ namespace OrthoLink
             float[] oldParams = null; PointF oldPa = PointF.Empty, oldPb = PointF.Empty;
             if (!reset)
             {
-                Seen was; RectangleF oa, ob;
-                if (_seen.TryGetValue(conn.Id, out was)) { oa = was.Src; ob = was.Dst; } else { oa = ra; ob = rb; }
+                Seen was; RectangleF oa, ob, oc;
+                if (_seen.TryGetValue(conn.Id, out was)) { oa = was.Src; ob = was.Dst; oc = was.Conn; } else { oa = ra; ob = rb; oc = Rect(conn); }
                 oldPa = PortOf(src, oa, link.SrcSide, link.SrcPos, link.Gap);
                 oldPb = PortOf(dst, ob, link.DstSide, link.DstPos, link.Gap);
-                oldParams = ReadParams(conn, link.Topo);
+                // read the segments against the box we last gave the line: when the line was selected and dragged
+                // together with the shapes, PowerPoint has already moved it, and counting that move as well as the
+                // shapes' move would shift the segments twice
+                oldParams = ReadParams(conn, link.Topo, oc);
             }
 
             ResolveSides(link, ra, rb);
@@ -408,6 +433,7 @@ namespace OrthoLink
                 p = plan.Params;
             }
             else p = oldParams != null ? Carry(oldParams, link.Topo, oldPa, oldPb, pa, pb) : plan.Params;
+            if (p.Length == 1) p[0] = Geo.Clamp(p[0], plan.Lo, plan.Hi);   // a kept middle segment must not cut into a box
 
             link.Write(conn);
             Place(conn, pa, pb);
@@ -418,18 +444,25 @@ namespace OrthoLink
         }
 
         /// <summary>Move the user's interior segments along with the ports they belong to.
-        /// The segment next to the start follows the start, the one next to the end follows the end,
+        /// When both ends moved by the same amount (both shapes dragged together) the whole line moves with them.
+        /// Otherwise the segment next to the start follows the start, the one next to the end follows the end,
         /// anything else (and the single middle of a 3-segment route) stays where it is.</summary>
         private static float[] Carry(float[] old, string topo, PointF oldPa, PointF oldPb, PointF pa, PointF pb)
         {
             int n = topo.Length;
             var p = (float[])old.Clone();
+            float dxa = pa.X - oldPa.X, dya = pa.Y - oldPa.Y, dxb = pb.X - oldPb.X, dyb = pb.Y - oldPb.Y;
+            if (Math.Abs(dxa - dxb) < 0.5f && Math.Abs(dya - dyb) < 0.5f)
+            {
+                for (int k = 1; k <= n - 2; k++) p[k - 1] += topo[k] == 'V' ? dxa : dya;
+                return p;
+            }
             if (n <= 3) return p;
             for (int k = 1; k <= n - 2; k++)
             {
                 bool vertical = topo[k] == 'V';
-                if (k == 1) p[k - 1] += vertical ? pa.X - oldPa.X : pa.Y - oldPa.Y;
-                else if (k == n - 2) p[k - 1] += vertical ? pb.X - oldPb.X : pb.Y - oldPb.Y;
+                if (k == 1) p[k - 1] += vertical ? dxa : dya;
+                else if (k == n - 2) p[k - 1] += vertical ? dxb : dyb;
             }
             return p;
         }
@@ -526,8 +559,9 @@ namespace OrthoLink
             catch (Exception ex) { Log.Error("Place.Flip", ex); }
         }
 
-        /// <summary>Absolute slide coordinates of the interior segments, from the shape's adjust values.</summary>
-        private static float[] ReadParams(PowerPoint.Shape c, string topo)
+        /// <summary>Absolute slide coordinates of the interior segments, from the shape's adjust values,
+        /// taken as fractions of the given box (where the line was, not necessarily where it is now).</summary>
+        private static float[] ReadParams(PowerPoint.Shape c, string topo, RectangleF box)
         {
             int n = topo.Length;
             var p = new float[Math.Max(0, n - 2)];
@@ -536,8 +570,8 @@ namespace OrthoLink
             {
                 float adj;
                 try { adj = c.Adjustments[k + 1]; } catch { adj = 0.5f; }
-                if (topo[k] == 'V') p[k - 1] = flipH ? c.Left + c.Width - adj * c.Width : c.Left + adj * c.Width;
-                else p[k - 1] = flipV ? c.Top + c.Height - adj * c.Height : c.Top + adj * c.Height;
+                if (topo[k] == 'V') p[k - 1] = flipH ? box.Right - adj * box.Width : box.Left + adj * box.Width;
+                else p[k - 1] = flipV ? box.Bottom - adj * box.Height : box.Top + adj * box.Height;
             }
             return p;
         }
@@ -572,23 +606,14 @@ namespace OrthoLink
             return p;
         }
 
-        /// <summary>Null for rectangles (bounding box is exact) and for things we do not render.</summary>
+        /// <summary>Null for rectangles (bounding box is exact) and for things we do not redraw.</summary>
         private Outline OutlineOf(PowerPoint.Shape s)
         {
             try
             {
-                var type = s.Type;
-                bool candidate = type == Office.MsoShapeType.msoFreeform ||
-                                 ((type == Office.MsoShapeType.msoAutoShape || type == Office.MsoShapeType.msoPlaceholder)
-                                  && s.AutoShapeType != Office.MsoAutoShapeType.msoShapeRectangle);
-                if (!candidate || Math.Abs(s.Rotation) > 0.01f || s.Width < 2 || s.Height < 2) return null;
-
-                var sb = new System.Text.StringBuilder();
-                sb.Append((int)s.AutoShapeType).Append('|').Append(s.Width.ToString("0.0")).Append('|').Append(s.Height.ToString("0.0"));
-                try { var adj = s.Adjustments; for (int i = 1; i <= adj.Count; i++) sb.Append('|').Append(adj[i].ToString("0.000")); } catch { }
-                if (type == Office.MsoShapeType.msoFreeform) { try { sb.Append("|n").Append(s.Nodes.Count); } catch { } }
-                string key = sb.ToString();
-
+                if (Math.Abs(s.Rotation) > 0.01f || s.Width < 2 || s.Height < 2) return null;
+                string key = OutlineKey(s);
+                if (key == null) return null;
                 CachedOutline c;
                 if (_outlines.TryGetValue(s.Id, out c) && c.Key == key) return c.Outline;
                 var o = RenderOutline(s);
@@ -598,39 +623,161 @@ namespace OrthoLink
             catch (Exception ex) { Log.Error("OutlineOf", ex); return null; }
         }
 
-        /// <summary>Copy the shape into the hidden template deck (so the user's undo list stays clean),
-        /// strip text and effects, render it to a PNG and read the alpha mask.</summary>
-        private Outline RenderOutline(PowerPoint.Shape s)
+        /// <summary>Everything the outline depends on, or null when there is no outline to sample.</summary>
+        private static string OutlineKey(PowerPoint.Shape s)
         {
-            var saved = SnapshotClipboard();
-            PowerPoint.Shape dup = null;
-            string png = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "ortholink_outline_" + Guid.NewGuid().ToString("N") + ".png");
             try
             {
-                var tslide = TemplateSlide();
-                dup = CopyPaste(s, tslide);
-                dup.Left = 10; dup.Top = 10;
-                try { if (dup.HasTextFrame == Office.MsoTriState.msoTrue) dup.TextFrame.TextRange.Text = ""; } catch { }
-                try { dup.Shadow.Visible = Office.MsoTriState.msoFalse; } catch { }
-                try { dup.Glow.Radius = 0; } catch { }
-                try { dup.SoftEdge.Type = Office.MsoSoftEdgeType.msoSoftEdgeTypeNone; } catch { }
-                try { dup.Reflection.Type = Office.MsoReflectionType.msoReflectionTypeNone; } catch { }
-                try { dup.Fill.Visible = Office.MsoTriState.msoTrue; dup.Fill.Solid(); dup.Fill.ForeColor.RGB = 0; dup.Fill.Transparency = 0; } catch { }
-                try { dup.Line.Visible = Office.MsoTriState.msoTrue; dup.Line.Weight = 0.5f; dup.Line.ForeColor.RGB = 0; dup.Line.Transparency = 0; } catch { }
-                const float pxPerPt = 3f;
-                int sw = (int)(_template.PageSetup.SlideWidth * pxPerPt), sh = (int)(_template.PageSetup.SlideHeight * pxPerPt);
-                dup.Export(png, PowerPoint.PpShapeFormat.ppShapeFormatPNG, sw, sh, PowerPoint.PpExportMode.ppRelativeToSlide);
-                var o = Outline.FromPng(png, 0f);
-                Log.Write("outline rendered for " + s.Name + " (" + s.AutoShapeType + ")");
+                var sb = new StringBuilder();
+                sb.Append(s.Width.ToString("0.0")).Append('|').Append(s.Height.ToString("0.0")).Append('|')
+                  .Append(s.HorizontalFlip == Office.MsoTriState.msoTrue ? 'h' : '-').Append(s.VerticalFlip == Office.MsoTriState.msoTrue ? 'v' : '-');
+                if (IsPreset(s))
+                {
+                    sb.Append("|p").Append((int)s.AutoShapeType);
+                    var adj = s.Adjustments;
+                    for (int i = 1; i <= adj.Count; i++) sb.Append('|').Append(adj[i].ToString("0.000"));
+                    return sb.ToString();
+                }
+                if (s.Type != Office.MsoShapeType.msoFreeform) return null;
+                var nodes = ReadNodes(s);
+                if (nodes == null) return null;
+                foreach (var n in nodes) sb.Append('|').Append(n.X.ToString("0.0")).Append(',').Append(n.Y.ToString("0.0")).Append(n.Curve ? 'c' : 'l');
+                return sb.ToString();
+            }
+            catch { return null; }   // some shapes refuse to report adjust values or points; use their bounding box
+        }
+
+        /// <summary>A PowerPoint preset shape (oval, trapezoid, ...) other than a plain rectangle.</summary>
+        private static bool IsPreset(PowerPoint.Shape s)
+        {
+            try
+            {
+                var type = s.Type;
+                if (type != Office.MsoShapeType.msoAutoShape && type != Office.MsoShapeType.msoPlaceholder) return false;
+                var a = s.AutoShapeType;
+                return a != Office.MsoAutoShapeType.msoShapeRectangle && a != Office.MsoAutoShapeType.msoShapeNotPrimitive &&
+                       a != Office.MsoAutoShapeType.msoShapeMixed;
+            }
+            catch { return false; }
+        }
+
+        private struct Node { public float X, Y; public bool Curve; }
+        private const int MaxNodes = 4000;   // beyond this, reading the points on every move gets slow
+
+        /// <summary>A freeform's points relative to its bounding box, or null when the path is not one simple
+        /// outline (the object model does not say where separate pieces or holes begin).</summary>
+        private static List<Node> ReadNodes(PowerPoint.Shape s)
+        {
+            var nodes = s.Nodes;
+            int n = nodes.Count;
+            if (n < 3 || n > MaxNodes) return null;
+            float left = s.Left, top = s.Top;
+            var list = new List<Node>(n);
+            for (int i = 1; i <= n; i++)
+            {
+                var node = nodes[i];
+                var pt = (Array)node.Points;
+                int r = pt.GetLowerBound(0), c = pt.GetLowerBound(1);
+                list.Add(new Node
+                {
+                    X = Convert.ToSingle(pt.GetValue(r, c)) - left,
+                    Y = Convert.ToSingle(pt.GetValue(r, c + 1)) - top,
+                    Curve = node.SegmentType == Office.MsoSegmentType.msoSegmentCurve,
+                });
+            }
+            // a curve is three nodes in a row (two control points, then its end); anything else means
+            // the path jumps between pieces
+            for (int i = 1; i < n; )
+            {
+                if (!list[i].Curve) { i++; continue; }
+                if (i + 2 >= n || !list[i + 1].Curve || !list[i + 2].Curve) return null;
+                i += 3;
+            }
+            return list;
+        }
+
+        private const float OutlineMargin = 8f;   // pt of white around the redrawn shape
+
+        /// <summary>Redraw the shape on the hidden scratch slide (same type, size, adjust values and flips, or the
+        /// same points for a freeform), black on white, export the slide and sample the picture.
+        /// The user's slide, undo list and clipboard are left alone.</summary>
+        private Outline RenderOutline(PowerPoint.Shape s)
+        {
+            float m = OutlineMargin;
+            float pageW = Math.Max(72f, s.Width + 2 * m), pageH = Math.Max(72f, s.Height + 2 * m);   // slides are 1 to 56 inches
+            if (pageW > 4032f || pageH > 4032f) return null;
+            string png = Path.Combine(Path.GetTempPath(), "ortholink_outline_" + Guid.NewGuid().ToString("N") + ".png");
+            PowerPoint.Shape dup = null;
+            try
+            {
+                var slide = ScratchSlide();
+                _scratch.PageSetup.SlideWidth = pageW;
+                _scratch.PageSetup.SlideHeight = pageH;
+                dup = Redraw(s, slide, m);
+                if (dup == null) return null;
+                Blacken(dup);
+                float k = Math.Min(3f, 2400f / Math.Max(pageW, pageH));
+                slide.Export(png, "PNG", (int)Math.Round(pageW * k), (int)Math.Round(pageH * k));
+                var o = Outline.FromSlidePng(png, pageW, pageH, m);
+                Log.Write("outline rendered for " + s.Name);
                 return o;
             }
             catch (Exception ex) { Log.Error("RenderOutline " + s.Name, ex); return null; }
             finally
             {
                 try { if (dup != null) dup.Delete(); } catch { }
-                try { if (System.IO.File.Exists(png)) System.IO.File.Delete(png); } catch { }
-                RestoreClipboard(saved);
+                try { if (File.Exists(png)) File.Delete(png); } catch { }
+                try { if (_scratch != null) _scratch.Saved = Office.MsoTriState.msoTrue; } catch { }
             }
+        }
+
+        /// <summary>A copy of s's geometry with its bounding box at (at, at), or null.</summary>
+        private static PowerPoint.Shape Redraw(PowerPoint.Shape s, PowerPoint.Slide slide, float at)
+        {
+            if (IsPreset(s))
+            {
+                var d = slide.Shapes.AddShape(s.AutoShapeType, at, at, s.Width, s.Height);
+                var from = s.Adjustments; var to = d.Adjustments;
+                for (int i = 1; i <= from.Count && i <= to.Count; i++) to[i] = from[i];
+                if (s.HorizontalFlip == Office.MsoTriState.msoTrue) d.Flip(Office.MsoFlipCmd.msoFlipHorizontal);
+                if (s.VerticalFlip == Office.MsoTriState.msoTrue) d.Flip(Office.MsoFlipCmd.msoFlipVertical);
+                return d;
+            }
+            var nodes = ReadNodes(s);
+            if (nodes == null) return null;
+            const Office.MsoEditingType corner = Office.MsoEditingType.msoEditingCorner;
+            var b = slide.Shapes.BuildFreeform(corner, at + nodes[0].X, at + nodes[0].Y);
+            for (int i = 1; i < nodes.Count; )
+            {
+                var p = nodes[i];
+                if (p.Curve)
+                {
+                    Node q = nodes[i + 1], e = nodes[i + 2];
+                    b.AddNodes(Office.MsoSegmentType.msoSegmentCurve, corner, at + p.X, at + p.Y, at + q.X, at + q.Y, at + e.X, at + e.Y);
+                    i += 3;
+                }
+                else { b.AddNodes(Office.MsoSegmentType.msoSegmentLine, corner, at + p.X, at + p.Y); i++; }
+            }
+            b.AddNodes(Office.MsoSegmentType.msoSegmentLine, corner, at + nodes[0].X, at + nodes[0].Y);
+            var f = b.ConvertToShape();
+            // the copy must cover exactly the original's box, otherwise we misread the points
+            if (Math.Abs(f.Left - at) > 0.5f || Math.Abs(f.Top - at) > 0.5f || Math.Abs(f.Width - s.Width) > 0.5f || Math.Abs(f.Height - s.Height) > 0.5f)
+            {
+                f.Delete();
+                return null;
+            }
+            return f;
+        }
+
+        private static void Blacken(PowerPoint.Shape d)
+        {
+            try { d.Shadow.Visible = Office.MsoTriState.msoFalse; } catch { }
+            try { d.Glow.Radius = 0; } catch { }
+            try { d.SoftEdge.Type = Office.MsoSoftEdgeType.msoSoftEdgeTypeNone; } catch { }
+            try { d.Reflection.Type = Office.MsoReflectionType.msoReflectionTypeNone; } catch { }
+            try { d.ThreeD.Visible = Office.MsoTriState.msoFalse; } catch { }
+            d.Fill.Visible = Office.MsoTriState.msoTrue; d.Fill.Solid(); d.Fill.ForeColor.RGB = 0; d.Fill.Transparency = 0;
+            d.Line.Visible = Office.MsoTriState.msoTrue; d.Line.Weight = 0.5f; d.Line.ForeColor.RGB = 0; d.Line.Transparency = 0;
         }
 
         private static Dictionary<int, PowerPoint.Shape> IndexShapes(PowerPoint.Slide slide)
@@ -654,76 +801,72 @@ namespace OrthoLink
             for (int i = 1; ; i++) { string n = "OrthoLink " + i; if (!used.Contains(n)) return n; }
         }
 
-        // ---- template + clipboard injection
+        // ---- scratch deck + clipboard injection
 
-        private PowerPoint.Slide TemplateSlide()
+        /// <summary>The one slide of a hidden, windowless deck: white, no master graphics, emptied.</summary>
+        private PowerPoint.Slide ScratchSlide()
         {
             bool alive = false;
-            try { alive = _template != null && _template.Slides.Count > 0; } catch { alive = false; }
+            try { alive = _scratch != null && _scratch.Slides.Count > 0; } catch { alive = false; }
             if (!alive)
-                _template = _app.Presentations.Open(_templatePath, Office.MsoTriState.msoTrue, Office.MsoTriState.msoTrue, Office.MsoTriState.msoFalse);
-            return _template.Slides[1];
+            {
+                _scratch = _app.Presentations.Add(Office.MsoTriState.msoFalse);
+                _scratch.Tags.Add("OL_SCRATCH", "1");   // lets scripts tell it apart from user decks
+                var s = _scratch.Slides.Add(1, PowerPoint.PpSlideLayout.ppLayoutBlank);
+                s.FollowMasterBackground = Office.MsoTriState.msoFalse;
+                s.Background.Fill.Solid();
+                s.Background.Fill.ForeColor.RGB = 0xFFFFFF;
+                s.DisplayMasterShapes = Office.MsoTriState.msoFalse;
+            }
+            var slide = _scratch.Slides[1];
+            for (int i = slide.Shapes.Count; i >= 1; i--) slide.Shapes[i].Delete();   // leftovers of an earlier failure
+            return slide;
         }
 
-        private PowerPoint.Shape TemplateShape(string topo)
-        {
-            return TemplateSlide().Shapes["OL_" + topo];
-        }
-
+        /// <summary>Put a connector of the given topology onto the slide. PowerPoint only lets such a shape in
+        /// through the clipboard, so we borrow it: back up what is on it, paste our shape, put it all back.</summary>
         private PowerPoint.Shape Inject(PowerPoint.Slide slide, string topo)
         {
-            var saved = SnapshotClipboard();
-            try { return CopyPaste(TemplateShape(topo), slide); }
-            finally { RestoreClipboard(saved); }
-        }
-
-        /// <summary>Copy a shape onto another slide via the clipboard, retrying when PowerPoint is not ready yet.</summary>
-        private static PowerPoint.Shape CopyPaste(PowerPoint.Shape source, PowerPoint.Slide target)
-        {
-            Exception last = null;
-            for (int attempt = 0; attempt < 4; attempt++)
-            {
-                try
-                {
-                    if (attempt > 0) { try { Clipboard.Clear(); } catch { } System.Threading.Thread.Sleep(60 * attempt); }
-                    source.Copy();
-                    var range = target.Shapes.Paste();
-                    return range[1];
-                }
-                catch (Exception ex) { last = ex; }
-            }
-            throw last;
-        }
-
-        // Only these clipboard formats are put back after we borrow the clipboard. Office's private formats
-        // cannot be restored faithfully from managed code and confuse later Copy/Paste calls.
-        private static readonly string[] RestorableFormats =
-        {
-            DataFormats.UnicodeText, DataFormats.Text, DataFormats.Rtf, DataFormats.Html, DataFormats.CommaSeparatedValue,
-            DataFormats.Bitmap, DataFormats.Dib, "PNG", DataFormats.FileDrop, DataFormats.Locale,
-        };
-
-        private static DataObject SnapshotClipboard()
-        {
+            var saved = Clip.Save();
             try
             {
-                var src = Clipboard.GetDataObject();
-                if (src == null) return null;
-                var d = new DataObject();
-                foreach (var f in src.GetFormats(false))
+                Exception last = null;
+                for (int attempt = 0; attempt < 3; attempt++)
                 {
-                    if (Array.IndexOf(RestorableFormats, f) < 0) continue;
-                    try { var o = src.GetData(f, false); if (o != null) d.SetData(f, o); } catch { }
+                    try
+                    {
+                        Clip.Put(Clip.Gvml, Template(topo));
+                        var range = slide.Shapes.Paste();
+                        var s = range[1];
+                        if (range.Count == 1 && s.Name == "OL_" + topo) return s;
+                        Log.Write("paste gave " + s.Name + " instead of OL_" + topo + ", retrying");
+                        range.Delete();
+                    }
+                    catch (Exception ex) { last = ex; }
+                    System.Threading.Thread.Sleep(50 * (attempt + 1));
                 }
-                return d;
+                throw last ?? new InvalidOperationException("没能把连接线贴到幻灯片上。");
             }
-            catch { return null; }
+            finally
+            {
+                try { Clip.Restore(saved); } catch (Exception ex) { Log.Error("Clip.Restore", ex); }
+            }
         }
 
-        private static void RestoreClipboard(DataObject d)
+        /// <summary>The connector shape for a topology, as generated by tools/build_template.py.</summary>
+        private byte[] Template(string topo)
         {
-            if (d == null) return;
-            try { if (d.GetFormats().Length > 0) Clipboard.SetDataObject(d, true); } catch { }
+            byte[] data;
+            if (_templates.TryGetValue(topo, out data)) return data;
+            using (var s = Assembly.GetExecutingAssembly().GetManifestResourceStream("OrthoLink.OL_" + topo + ".gvml"))
+            {
+                if (s == null) throw new InvalidOperationException("missing connector template OL_" + topo);
+                var m = new MemoryStream();
+                s.CopyTo(m);
+                data = m.ToArray();
+            }
+            _templates[topo] = data;
+            return data;
         }
     }
 }

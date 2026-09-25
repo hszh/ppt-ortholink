@@ -25,13 +25,25 @@ namespace OrthoLink
         private PowerPoint.Application _app;
         private ConnectorService _svc;
         private Office.IRibbonUI _ribbon;
-        private Timer _timer;
-        private bool _busy;
+        private int _busy;                   // > 0 while one of our own operations runs; follow checks wait for it
         private string _lastSelection = "";
-        private DateTime _lastTickError = DateTime.MinValue;
+        private DateTime _lastCheckError = DateTime.MinValue;
 
+        // follow-up after user input instead of polling: see StartWatching
+        private const int CheckDelayMs = 100;
+        private Timer _check;                // one-shot, restarted by every mouse / key release
+        private HookProc _hookProc;          // kept in a field so it is not garbage collected while Windows calls it
+        private IntPtr _hook = IntPtr.Zero;
+
+        private delegate IntPtr HookProc(int code, IntPtr wParam, IntPtr lParam);
+        [DllImport("user32.dll", SetLastError = true)] private static extern IntPtr SetWindowsHookEx(int idHook, HookProc fn, IntPtr module, uint threadId);
+        [DllImport("user32.dll")] private static extern bool UnhookWindowsHookEx(IntPtr hook);
+        [DllImport("user32.dll")] private static extern IntPtr CallNextHookEx(IntPtr hook, int code, IntPtr wParam, IntPtr lParam);
+        [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
         [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int vKey);
-        private const int VK_LBUTTON = 0x01;
+        private const int WH_GETMESSAGE = 3, PM_REMOVE = 1, VK_LBUTTON = 0x01;
+        private const int WM_KEYUP = 0x0101, WM_SYSKEYUP = 0x0105, WM_LBUTTONUP = 0x0202, WM_RBUTTONUP = 0x0205,
+                          WM_MBUTTONUP = 0x0208, WM_POINTERUP = 0x0247;
 
         private static readonly Side?[] SideItems = { null, Side.Left, Side.Right, Side.Top, Side.Bottom };
 
@@ -43,22 +55,21 @@ namespace OrthoLink
             {
                 _app = (PowerPoint.Application)application;
                 Settings.Load();
-                string dir = Path.GetDirectoryName(new Uri(Assembly.GetExecutingAssembly().CodeBase).LocalPath);
-                _svc = new ConnectorService(_app, Path.Combine(dir, "template.pptx"));
+                _svc = new ConnectorService(_app);
                 try { ((Office.COMAddIn)addInInst).Object = this; } catch (Exception ex) { Log.Error("expose Object", ex); }
                 Log.Write("OnConnection ok, mode=" + connectMode + ", version " + VersionString);
-                if (connectMode != ext_ConnectMode.ext_cm_Startup) StartTimer();
+                if (connectMode != ext_ConnectMode.ext_cm_Startup) StartWatching();
             }
             catch (Exception ex) { Log.Error("OnConnection", ex); }
         }
 
-        public void OnStartupComplete(ref Array custom) { StartTimer(); }
+        public void OnStartupComplete(ref Array custom) { StartWatching(); }
 
         public void OnDisconnection(ext_DisconnectMode removeMode, ref Array custom)
         {
             try
             {
-                if (_timer != null) { _timer.Stop(); _timer.Dispose(); _timer = null; }
+                StopWatching();
                 if (_svc != null) _svc.Shutdown();
                 Log.Write("OnDisconnection " + removeMode);
             }
@@ -271,24 +282,27 @@ namespace OrthoLink
         /// <summary>Connect the two currently selected shapes (first selected = start). Returns 1 on success.</summary>
         public int ConnectSelected()
         {
-            var sel = _app.ActiveWindow.Selection;
-            if (sel.Type != PowerPoint.PpSelectionType.ppSelectionShapes || sel.ShapeRange.Count != 2)
+            return Busy(() =>
             {
-                Info("请先选中两个形状：先点起点形状，再按住 Ctrl 点终点形状，然后点“连接”。");
-                return 0;
-            }
-            var a = sel.ShapeRange[1]; var b = sel.ShapeRange[2];
-            if (Link.IsLink(a) || Link.IsLink(b)) { Info("选中的形状里有连接线，请选两个普通形状。"); return 0; }
-            var conn = _svc.Create(SlideOf(a), a, b);
-            conn.Select();
-            Refresh();
-            return 1;
+                var sel = _app.ActiveWindow.Selection;
+                if (sel.Type != PowerPoint.PpSelectionType.ppSelectionShapes || sel.ShapeRange.Count != 2)
+                {
+                    Info("请先选中两个形状：先点起点形状，再按住 Ctrl 点终点形状，然后点“连接”。");
+                    return 0;
+                }
+                var a = sel.ShapeRange[1]; var b = sel.ShapeRange[2];
+                if (Link.IsLink(a) || Link.IsLink(b)) { Info("选中的形状里有连接线，请选两个普通形状。"); return 0; }
+                var conn = _svc.Create(SlideOf(a), a, b);
+                conn.Select();
+                Refresh();
+                return 1;
+            });
         }
 
         public object ConnectShapes(object srcShape, object dstShape)
         {
             var a = (PowerPoint.Shape)srcShape; var b = (PowerPoint.Shape)dstShape;
-            return _svc.Create(SlideOf(a), a, b);
+            return Busy(() => (object)_svc.Create(SlideOf(a), a, b));
         }
 
         /// <summary>side: "" or "Auto" = automatic, else Left/Right/Top/Bottom.</summary>
@@ -297,49 +311,92 @@ namespace OrthoLink
             var c = (PowerPoint.Shape)connector;
             Side? s = null; Side parsed;
             if (!string.IsNullOrEmpty(side) && !side.Equals("Auto", StringComparison.OrdinalIgnoreCase) && Enum.TryParse(side, true, out parsed)) s = parsed;
-            return _svc.SetSide(SlideOf(c), c, source, s);
+            return Busy(() => (object)_svc.SetSide(SlideOf(c), c, source, s));
         }
 
-        public int UpdateSlide(object slide, bool resetMiddle) { return _svc.UpdateAll((PowerPoint.Slide)slide, resetMiddle); }
-        public int FollowSlide(object slide) { return _svc.Follow((PowerPoint.Slide)slide); }
+        public int UpdateSlide(object slide, bool resetMiddle) { return Busy(() => _svc.UpdateAll((PowerPoint.Slide)slide, resetMiddle)); }
+        public int FollowSlide(object slide) { return Busy(() => _svc.Follow((PowerPoint.Slide)slide)); }
         public bool AutoFollow { get { return Settings.AutoFollow; } set { Settings.AutoFollow = value; } }
         public float RadiusPt { get { return Settings.RadiusPt; } set { Settings.RadiusPt = value; Settings.Save(); } }
         public float GapPt { get { return Settings.GapPt; } set { Settings.GapPt = value; Settings.Save(); } }
-        public object SetConnectorGap(object connector, float gapPt) { var c = (PowerPoint.Shape)connector; return _svc.SetGap(SlideOf(c), c, gapPt); }
+        public object SetConnectorGap(object connector, float gapPt) { var c = (PowerPoint.Shape)connector; return Busy(() => (object)_svc.SetGap(SlideOf(c), c, gapPt)); }
         public float ParseRadiusPt(string text) { var r = ParseRadius(text); return r.HasValue ? r.Value : -1f; }
         public bool ArrowEnd { get { return Settings.ArrowEnd; } set { Settings.ArrowEnd = value; } }
         public bool ArrowStart { get { return Settings.ArrowStart; } set { Settings.ArrowStart = value; } }
         public string LogPath { get { return Log.Path; } }
         public void ActivateTab() { try { if (_ribbon != null) _ribbon.ActivateTab("olTab"); } catch (Exception ex) { Log.Error("ActivateTab", ex); } }
 
-        // ================================================================ timer: auto-follow + ribbon refresh on selection change
+        // ================================================================ auto-follow after user input, ribbon refresh on selection change
 
-        private void StartTimer()
+        /// <summary>PowerPoint does not tell add-ins that a shape moved. Instead of polling, we watch the messages
+        /// PowerPoint's own window thread takes from its queue: releasing a mouse button or a key is when shapes may
+        /// have been dragged, resized, nudged, aligned or undone, so a moment later the current slide is checked once.
+        /// Nothing runs while the user does nothing.</summary>
+        private void StartWatching()
         {
-            if (_timer != null) return;
-            _timer = new Timer { Interval = 200 };
-            _timer.Tick += (s, e) => Tick();
-            _timer.Start();
+            if (_check != null) return;
+            _check = new Timer { Interval = CheckDelayMs };
+            _check.Tick += (s, e) => { _check.Stop(); Check(); };
+            _hookProc = OnThreadMessage;
+            _hook = SetWindowsHookEx(WH_GETMESSAGE, _hookProc, IntPtr.Zero, GetCurrentThreadId());
+            if (_hook == IntPtr.Zero) Log.Write("SetWindowsHookEx failed, error " + Marshal.GetLastWin32Error());
+            try { ((PowerPoint.EApplication_Event)_app).WindowSelectionChange += OnWindowSelectionChange; }
+            catch (Exception ex) { Log.Error("subscribe WindowSelectionChange", ex); }
         }
 
-        private void Tick()
+        private void StopWatching()
         {
-            if (_busy || _app == null) return;
-            if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0) return;   // a drag may be in progress
-            _busy = true;
+            if (_hook != IntPtr.Zero) { UnhookWindowsHookEx(_hook); _hook = IntPtr.Zero; }
+            try { if (_app != null) ((PowerPoint.EApplication_Event)_app).WindowSelectionChange -= OnWindowSelectionChange; } catch { }
+            if (_check != null) { _check.Stop(); _check.Dispose(); _check = null; }
+        }
+
+        private IntPtr OnThreadMessage(int code, IntPtr wParam, IntPtr lParam)
+        {
             try
             {
-                string sig = SelectionSignature();
-                if (sig != _lastSelection) { _lastSelection = sig; Refresh(); }
-                if (!Settings.AutoFollow) return;
+                if (code >= 0 && wParam.ToInt64() == PM_REMOVE)
+                {
+                    int msg = Marshal.ReadInt32(lParam, IntPtr.Size);   // MSG.message, right after MSG.hwnd
+                    if (msg == WM_LBUTTONUP || msg == WM_RBUTTONUP || msg == WM_MBUTTONUP || msg == WM_POINTERUP ||
+                        msg == WM_KEYUP || msg == WM_SYSKEYUP)
+                        ScheduleCheck();
+                }
+            }
+            catch { /* never let an exception escape into Windows */ }
+            return CallNextHookEx(_hook, code, wParam, lParam);
+        }
+
+        /// <summary>(Re)start the countdown to a check; while input keeps coming (typing, key repeat) it keeps moving back.</summary>
+        private void ScheduleCheck()
+        {
+            if (_check == null) return;
+            _check.Stop();
+            _check.Start();
+        }
+
+        private void Check()
+        {
+            if (_app == null || !Settings.AutoFollow) return;
+            if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0) return;   // another drag has begun; its release schedules a check
+            if (_busy > 0) { ScheduleCheck(); return; }                   // one of our operations is running; look again after it
+            _busy++;
+            try
+            {
                 var slide = CurrentSlide();
                 if (slide != null && _svc.Follow(slide) > 0) Refresh();
             }
             catch (Exception ex)
             {
-                if ((DateTime.Now - _lastTickError).TotalSeconds > 10) { Log.Error("Tick", ex); _lastTickError = DateTime.Now; }
+                if ((DateTime.Now - _lastCheckError).TotalSeconds > 10) { Log.Error("Check", ex); _lastCheckError = DateTime.Now; }
             }
-            finally { _busy = false; }
+            finally { _busy--; }
+        }
+
+        private void OnWindowSelectionChange(PowerPoint.Selection sel)
+        {
+            string sig = SelectionSignature();
+            if (sig != _lastSelection) { _lastSelection = sig; Refresh(); }
         }
 
         private string SelectionSignature()
@@ -391,14 +448,24 @@ namespace OrthoLink
             return l.Count > 0 ? l[0] : null;
         }
 
-        private static void Guard(string where, Action a)
+        /// <summary>Runs one of our operations. Follow checks that come due meanwhile (PowerPoint can process
+        /// messages in the middle of a paste or an export) wait until it is finished.</summary>
+        private T Busy<T>(Func<T> f)
         {
+            _busy++;
+            try { return f(); }
+            finally { _busy--; }
+        }
+
+        private void Guard(string where, Action a)
+        {
+            Exception error = null;
+            _busy++;
             try { a(); }
-            catch (Exception ex)
-            {
-                Log.Error(where, ex);
-                MessageBox.Show("OrthoLink 出错了：" + ex.Message + "\n\n详细记录在：" + Log.Path, "OrthoLink", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
+            catch (Exception ex) { Log.Error(where, ex); error = ex; }
+            finally { _busy--; }
+            if (error != null)
+                MessageBox.Show("OrthoLink 出错了：" + error.Message + "\n\n详细记录在：" + Log.Path, "OrthoLink", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
 
         private static void Info(string text)

@@ -37,8 +37,15 @@ if not errorlevel 1 (
   -resource:src\OrthoLink.AddIn\Ribbon.xml,OrthoLink.Ribbon.xml ^
   -resource:assets\icon-32.png,OrthoLink.icon32.png ^
   -resource:assets\icon-16.png,OrthoLink.icon16.png ^
+  -resource:build\gvml\OL_HV.gvml,OrthoLink.OL_HV.gvml ^
+  -resource:build\gvml\OL_VH.gvml,OrthoLink.OL_VH.gvml ^
+  -resource:build\gvml\OL_HVH.gvml,OrthoLink.OL_HVH.gvml ^
+  -resource:build\gvml\OL_VHV.gvml,OrthoLink.OL_VHV.gvml ^
+  -resource:build\gvml\OL_HVHV.gvml,OrthoLink.OL_HVHV.gvml ^
+  -resource:build\gvml\OL_VHVH.gvml,OrthoLink.OL_VHVH.gvml ^
+  -resource:build\gvml\OL_HVHVH.gvml,OrthoLink.OL_HVHVH.gvml ^
+  -resource:build\gvml\OL_VHVHV.gvml,OrthoLink.OL_VHVHV.gvml ^
   src\Version.cs src\OrthoLink.AddIn\*.cs || exit /b 1
-copy /y src\OrthoLink.AddIn\template.pptx build\ >nul
 
 echo == compile setup program
 if not exist dist mkdir dist
@@ -47,7 +54,6 @@ if not exist dist mkdir dist
   -out:dist\OrthoLink-Setup-%VER%.exe ^
   -r:"%FX%\System.Windows.Forms.dll" -r:"%FX%\System.Drawing.dll" ^
   -resource:build\OrthoLink.AddIn.dll,OrthoLink.Setup.OrthoLink.AddIn.dll ^
-  -resource:build\template.pptx,OrthoLink.Setup.template.pptx ^
   src\Version.cs src\OrthoLink.Setup\*.cs || exit /b 1
 
 echo == done

@@ -9,7 +9,7 @@ namespace OrthoLink
 {
     internal static class Ver
     {
-        public const string Display = "1.0.0";
-        public const string Assembly = "1.0.0.0";
+        public const string Display = "1.1.0";
+        public const string Assembly = "1.1.0.0";
     }
 }

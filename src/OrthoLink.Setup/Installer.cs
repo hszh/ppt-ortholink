@@ -27,7 +27,6 @@ namespace OrthoLink.Setup
             get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OrthoLink"); }
         }
         public static string DllPath { get { return Path.Combine(InstallDir, "OrthoLink.AddIn.dll"); } }
-        public static string TemplatePath { get { return Path.Combine(InstallDir, "template.pptx"); } }
         public static string SetupCopyPath { get { return Path.Combine(InstallDir, "OrthoLink-Setup.exe"); } }
         public static string LogPath { get { return Path.Combine(Path.GetTempPath(), "OrthoLink-Setup.log"); } }
 
@@ -58,7 +57,7 @@ namespace OrthoLink.Setup
             progress("正在复制文件…");
             Directory.CreateDirectory(InstallDir);
             Extract("OrthoLink.Setup.OrthoLink.AddIn.dll", DllPath);
-            Extract("OrthoLink.Setup.template.pptx", TemplatePath);
+            DeleteFile(Path.Combine(InstallDir, "template.pptx"));   // 1.0.0 kept the connector templates there; they are inside the DLL now
             CopySelf();
 
             progress("正在注册插件…");

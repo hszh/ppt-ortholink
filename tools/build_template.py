@@ -1,10 +1,12 @@
 """
-Generate src/OrthoLink.AddIn/template.pptx.
+Generate build/gvml/OL_<topology>.gvml, one per connector topology.
 
-The template holds one "custom geometry" shape per connector topology
-(sequence of horizontal / vertical segments). The add-in copies the right
-shape into the user's slide, then only touches position / size / flip /
-adjust values, never the geometry itself.
+Each file holds one "custom geometry" shape for a connector topology
+(sequence of horizontal / vertical segments), packaged in the clipboard
+format Office uses to move shapes between programs ("Art::GVML ClipFormat").
+build.cmd embeds the files in the add-in; the add-in puts the right one on
+the clipboard, pastes it into the user's slide, then only touches
+position / size / flip / adjust values, never the geometry itself.
 
 Adjust values (visible in the object model as Shape.Adjustments):
   adj1          corner radius in EMU (12700 EMU = 1 pt); no handle
@@ -17,15 +19,15 @@ PowerPoint's flipH / flipV take care of the other three quadrants.
 Every corner is a quarter circle whose radius shrinks automatically when a
 segment is too short.
 """
-import os, sys
-from pptx import Presentation
-from pptx.util import Pt
-from pptx.enum.shapes import MSO_SHAPE
-from pptx.oxml.ns import qn
-from lxml import etree
+import io, os, sys, zipfile
 
 A = "http://schemas.openxmlformats.org/drawingml/2006/main"
-DEFAULT_RADIUS_EMU = int(Pt(12))
+LC = "http://schemas.openxmlformats.org/drawingml/2006/lockedCanvas"
+EMU_PER_PT = 12700
+DEFAULT_RADIUS_EMU = 12 * EMU_PER_PT
+SIZE_EMU = (100 * EMU_PER_PT, 80 * EMU_PER_PT)   # any size will do, the add-in resizes the shape
+LINE_EMU = 19050     # 1.5 pt
+LINE_RGB = "404040"
 Q = 5400000          # 90 degrees in 60000ths of a degree
 TOPOLOGIES = ["HV", "VH", "HVH", "VHV", "HVHV", "VHVH", "HVHVH", "VHVHV"]
 
@@ -128,7 +130,7 @@ def custgeom_xml(topo):
     guides, handles, path, free = build(topo)
     av = [gd("adj1", f"val {DEFAULT_RADIUS_EMU}")] + [gd(f"adj{i + 2}", "val 50000") for i in range(free)]
     return (
-        f'<a:custGeom xmlns:a="{A}">'
+        '<a:custGeom>'
         f'<a:avLst>{"".join(av)}</a:avLst>'
         f'<a:gdLst>{"".join(guides)}</a:gdLst>'
         f'<a:ahLst>{"".join(handles)}</a:ahLst>'
@@ -139,32 +141,59 @@ def custgeom_xml(topo):
     )
 
 
-def main(out_path):
-    prs = Presentation()
-    slide = prs.slides.add_slide(prs.slide_layouts[6])
-    x = Pt(20)
+def drawing_xml(topo):
+    """The shape on a locked canvas, the way Office writes shapes to the clipboard."""
+    cx, cy = SIZE_EMU
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<a:graphic xmlns:a="{A}"><a:graphicData uri="{LC}"><lc:lockedCanvas xmlns:lc="{LC}">'
+        '<a:nvGrpSpPr><a:cNvPr id="0" name=""/><a:cNvGrpSpPr/></a:nvGrpSpPr>'
+        f'<a:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/>'
+        f'<a:chOff x="0" y="0"/><a:chExt cx="{cx}" cy="{cy}"/></a:xfrm></a:grpSpPr>'
+        f'<a:sp><a:nvSpPr><a:cNvPr id="2" name="OL_{topo}"/><a:cNvSpPr/></a:nvSpPr>'
+        f'<a:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm>{custgeom_xml(topo)}'
+        f'<a:noFill/><a:ln w="{LINE_EMU}"><a:solidFill><a:srgbClr val="{LINE_RGB}"/></a:solidFill><a:round/></a:ln>'
+        '</a:spPr></a:sp>'
+        '</lc:lockedCanvas></a:graphicData></a:graphic>'
+    )
+
+
+CONTENT_TYPES = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+    '<Default Extension="xml" ContentType="application/xml"/>'
+    '<Override PartName="/clipboard/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>'
+    '</Types>'
+)
+ROOT_RELS = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="clipboard/drawings/drawing1.xml"/>'
+    '</Relationships>'
+)
+
+
+def gvml(topo):
+    """Bytes of an "Art::GVML ClipFormat" package holding the connector shape for topo."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for name, text in (("[Content_Types].xml", CONTENT_TYPES), ("_rels/.rels", ROOT_RELS),
+                           ("clipboard/drawings/drawing1.xml", drawing_xml(topo))):
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))   # fixed time: same input, same bytes
+            z.writestr(info, text.encode("utf-8"), compress_type=zipfile.ZIP_DEFLATED)
+    return buf.getvalue()
+
+
+def main(out_dir):
+    os.makedirs(out_dir, exist_ok=True)
     for topo in TOPOLOGIES:
-        shp = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, x, Pt(60), Pt(100), Pt(80))
-        shp.name = "OL_" + topo
-        spPr = shp._element.spPr
-        prst = spPr.find(qn("a:prstGeom"))
-        prst.addprevious(etree.fromstring(custgeom_xml(topo)))
-        spPr.remove(prst)
-        shp.fill.background()
-        shp.line.width = Pt(1.5)
-        shp.line.color.rgb = __import__("pptx.dml.color", fromlist=["RGBColor"]).RGBColor(0x40, 0x40, 0x40)
-        ln = spPr.find(qn("a:ln"))
-        etree.SubElement(ln, qn("a:round"))
-        for tag in ("p:txBody", "p:style"):
-            el = shp._element.find(qn(tag))
-            if el is not None:
-                shp._element.remove(el)
-        x += Pt(115)
-    prs.save(out_path)
-    print("saved", out_path)
+        with open(os.path.join(out_dir, "OL_%s.gvml" % topo), "wb") as f:
+            f.write(gvml(topo))
+    print("wrote %d connector templates to %s" % (len(TOPOLOGIES), out_dir))
 
 
 if __name__ == "__main__":
     here = os.path.dirname(os.path.abspath(__file__))
-    default = os.path.join(here, "..", "src", "OrthoLink.AddIn", "template.pptx")
+    default = os.path.join(here, "..", "build", "gvml")
     main(os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else default))
