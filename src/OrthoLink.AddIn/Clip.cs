@@ -33,10 +33,10 @@ namespace OrthoLink
             internal readonly List<KeyValuePair<uint, byte[]>> Items = new List<KeyValuePair<uint, byte[]>>();
         }
 
-        public static Snapshot Save()
+        public static Snapshot Save(int timeoutMs)
         {
             var snap = new Snapshot();
-            Open(2000);
+            Open(timeoutMs);
             try
             {
                 long budget = MaxBytes;
@@ -58,9 +58,9 @@ namespace OrthoLink
         }
 
         /// <summary>Replace the clipboard content by a single format.</summary>
-        public static void Put(string format, byte[] data)
+        public static void Put(string format, byte[] data, int timeoutMs)
         {
-            Open(2000);
+            Open(timeoutMs);
             try
             {
                 EmptyClipboard();
@@ -71,9 +71,9 @@ namespace OrthoLink
         }
 
         /// <summary>Put a snapshot back. An empty snapshot leaves the clipboard empty.</summary>
-        public static void Restore(Snapshot snap)
+        public static void Restore(Snapshot snap, int timeoutMs)
         {
-            Open(5000);
+            Open(timeoutMs);
             try
             {
                 EmptyClipboard();
@@ -101,13 +101,15 @@ namespace OrthoLink
                 _owner = w;
             }
             var until = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+            int firstError = 0;
             while (!OpenClipboard(_owner.Handle))
             {
+                if (firstError == 0) firstError = Marshal.GetLastWin32Error();   // for the log, once
                 if (DateTime.UtcNow > until)
                 {
                     string holder = Holder();
-                    Log.Write("clipboard kept open by " + holder + " for more than " + timeoutMs + " ms");
-                    throw new InvalidOperationException("剪贴板正被其他程序（" + holder + "）占用，请稍后再试。");
+                    Log.Write("clipboard kept open by " + (holder ?? "未知程序") + " for more than " + timeoutMs + " ms (error " + firstError + ")");
+                    throw new InvalidOperationException("剪贴板正被" + (holder == null ? "另一个程序" : "“" + holder + "”") + "占用，请稍后再试。");
                 }
                 // Whoever has the clipboard open may be waiting for data that this thread renders
                 // (PowerPoint's own copy), so let messages sent to this thread through while we wait.
@@ -117,18 +119,19 @@ namespace OrthoLink
             }
         }
 
-        /// <summary>Name of the program that has the clipboard open, for the log and the error message.</summary>
+        /// <summary>Name of the program that has the clipboard open, or null when there is no window to ask
+        /// (a program that opened the clipboard without giving a window is invisible to GetOpenClipboardWindow).</summary>
         private static string Holder()
         {
             try
             {
                 IntPtr w = GetOpenClipboardWindow();
-                if (w == IntPtr.Zero) return "未知程序";
+                if (w == IntPtr.Zero) return null;
                 uint pid;
                 GetWindowThreadProcessId(w, out pid);
                 return System.Diagnostics.Process.GetProcessById((int)pid).ProcessName;
             }
-            catch { return "未知程序"; }
+            catch { return null; }
         }
 
         private static bool Skip(uint f)
