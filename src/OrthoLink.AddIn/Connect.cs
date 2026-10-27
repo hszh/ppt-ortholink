@@ -26,7 +26,6 @@ namespace OrthoLink
         private ConnectorService _svc;
         private Office.IRibbonUI _ribbon;
         private int _busy;                   // > 0 while one of our own operations runs; follow checks wait for it
-        private string _lastSelection = "";
         private DateTime _lastCheckError = DateTime.MinValue;
 
         // follow-up after user input instead of polling: see StartWatching
@@ -107,6 +106,31 @@ namespace OrthoLink
         // ================================================================ ribbon callbacks: actions
 
         public void OnConnect(Office.IRibbonControl control) { Guard("OnConnect", () => ConnectSelected()); }
+
+        public void OnShapeRadiusChange(Office.IRibbonControl control, string text)
+        {
+            Guard("OnShapeRadiusChange", () =>
+            {
+                float? r = ParseRadius(text);
+                if (!r.HasValue) { Info("请输入 0 到 200 之间的数字（单位 pt），例如 8。0 恢复尖角。"); Refresh(); return; }
+                RoundSelectedShapes(r.Value);
+            });
+        }
+
+        public void OnClearShapeRadius(Office.IRibbonControl control) { Guard("OnClearShapeRadius", () => RoundSelectedShapes(0)); }
+        public bool GetHasPolygon(Office.IRibbonControl control) { return SelectedPolygons().Count > 0; }
+        public string GetShapeRadiusText(Office.IRibbonControl control)
+        {
+            try
+            {
+                var shapes = SelectedPolygons();
+                if (shapes.Count == 0) return "";
+                float r = PolygonRounder.GetRadius(shapes[0]);
+                foreach (var s in shapes) if (Math.Abs(PolygonRounder.GetRadius(s) - r) > 0.01f) return "多个值";
+                return RadiusText(r);
+            }
+            catch { return ""; }
+        }
 
         public void OnReroute(Office.IRibbonControl control)
         {
@@ -193,7 +217,7 @@ namespace OrthoLink
             string t = text.Trim().ToLowerInvariant().Replace("pt", "").Replace("磅", "").Trim();
             if (t == "直角" || t == "无") return 0f;
             float v;
-            if (!float.TryParse(t, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out v)) return null;
+            if (!float.TryParse(t, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out v) || !PolygonGeometry.Finite(v)) return null;
             if (v < 0) v = 0; if (v > 200) v = 200;
             return v;
         }
@@ -278,6 +302,47 @@ namespace OrthoLink
         // ================================================================ automation API (also used by tests)
 
         public string Version { get { return VersionString; } }
+
+        public int RoundSelectedShapes(float radiusPt)
+        {
+            return Busy(() =>
+            {
+                var shapes = SelectedPolygons();
+                if (shapes.Count == 0) return 0;
+                var selection = new List<PowerPoint.Shape>();
+                foreach (PowerPoint.Shape s in _app.ActiveWindow.Selection.ShapeRange) selection.Add(s);
+                _app.StartNewUndoEntry();
+                int changed = 0;
+                var failures = new List<string>();
+                foreach (var s in shapes)
+                {
+                    try { if (PolygonRounder.SetRadius(s, radiusPt)) changed++; }
+                    catch (Exception ex) { Log.Error("RoundSelectedShapes " + s.Name, ex); failures.Add(s.Name + "：" + ex.Message); }
+                }
+                var slide = CurrentSlide();
+                if (changed > 0 && slide != null) _svc.UpdateAll(slide, false);
+                // Preserve unsupported items in a mixed selection, too.
+                for (int i = 0; i < selection.Count; i++) selection[i].Select(i == 0 ? Office.MsoTriState.msoTrue : Office.MsoTriState.msoFalse);
+                Refresh();
+                if (failures.Count > 0) throw new InvalidOperationException("部分形状未能设置圆角：\n" + string.Join("\n", failures));
+                return changed;
+            });
+        }
+
+        public bool CanRoundShape(object shape) { return PolygonRounder.IsSupported((PowerPoint.Shape)shape); }
+        public float GetShapeRadius(object shape) { return PolygonRounder.GetRadius((PowerPoint.Shape)shape); }
+        public bool SetShapeRadius(object shape, float radiusPt)
+        {
+            return Busy(() =>
+            {
+                var s = (PowerPoint.Shape)shape;
+                _app.StartNewUndoEntry();
+                bool changed = PolygonRounder.SetRadius(s, radiusPt);
+                if (changed) _svc.UpdateAll(SlideOf(s), false);
+                Refresh();
+                return changed;
+            });
+        }
 
         /// <summary>Connect the two currently selected shapes (first selected = start). Returns 1 on success.</summary>
         public int ConnectSelected()
@@ -395,21 +460,9 @@ namespace OrthoLink
 
         private void OnWindowSelectionChange(PowerPoint.Selection sel)
         {
-            string sig = SelectionSignature();
-            if (sig != _lastSelection) { _lastSelection = sig; Refresh(); }
-        }
-
-        private string SelectionSignature()
-        {
-            try
-            {
-                var sel = _app.ActiveWindow.Selection;
-                if (sel.Type != PowerPoint.PpSelectionType.ppSelectionShapes) return "";
-                var ids = new List<string>();
-                foreach (PowerPoint.Shape s in sel.ShapeRange) if (Link.IsLink(s)) ids.Add(s.Id.ToString());
-                return string.Join(",", ids);
-            }
-            catch { return ""; }
+            if (_busy > 0) return;
+            // Undo/redo can change a radius without changing the selected shape IDs.
+            Refresh();
         }
 
         // ================================================================ helpers
@@ -428,6 +481,20 @@ namespace OrthoLink
         }
 
         private static PowerPoint.Slide SlideOf(PowerPoint.Shape s) { return (PowerPoint.Slide)s.Parent; }
+
+        private List<PowerPoint.Shape> SelectedPolygons()
+        {
+            var list = new List<PowerPoint.Shape>();
+            try
+            {
+                if (CurrentSlide() == null) return list;
+                var sel = _app.ActiveWindow.Selection;
+                if (sel.Type != PowerPoint.PpSelectionType.ppSelectionShapes || sel.HasChildShapeRange) return list;
+                foreach (PowerPoint.Shape s in sel.ShapeRange) if (PolygonRounder.IsSupported(s)) list.Add(s);
+            }
+            catch { }
+            return list;
+        }
 
         private List<PowerPoint.Shape> SelectedLinks()
         {

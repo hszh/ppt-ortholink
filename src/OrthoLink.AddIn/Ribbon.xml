@@ -72,6 +72,20 @@
                           onAction="OnArrowStart" getPressed="GetArrowStart"/>
           </box>
         </group>
+        <group id="olGroupPolygon" label="形状圆角">
+          <comboBox id="olShapeRadius" label="半径" sizeString="99.9 pt" getText="GetShapeRadiusText" onChange="OnShapeRadiusChange" getEnabled="GetHasPolygon"
+                    screentip="选中多边形的圆角半径" supertip="选中三角形、梯形、平行四边形、菱形、五至八边形或矩形，输入 0–200 pt 的半径。支持多选；过大的半径会自动限制。保留文字和样式，转换后仍可编辑。0 恢复原始尖角形状。">
+            <item id="olPR0" label="0"/>
+            <item id="olPR4" label="4"/>
+            <item id="olPR6" label="6"/>
+            <item id="olPR8" label="8"/>
+            <item id="olPR12" label="12"/>
+            <item id="olPR16" label="16"/>
+            <item id="olPR24" label="24"/>
+          </comboBox>
+          <button id="olClearShapeRadius" label="恢复尖角" imageMso="Undo" onAction="OnClearShapeRadius" getEnabled="GetHasPolygon"
+                  screentip="恢复原始多边形" supertip="移除所选多边形的圆角，恢复原始形状及其黄色调节柄。"/>
+        </group>
         <group id="olGroupDefaults" label="新线默认值">
           <box id="olBoxDefaults" boxStyle="vertical">
             <comboBox id="olDefaultRadius" label="圆角" sizeString="99.9 pt" getText="GetDefaultRadiusText" onChange="OnDefaultRadiusChange"
