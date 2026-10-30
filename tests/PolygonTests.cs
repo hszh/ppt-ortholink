@@ -229,6 +229,7 @@ internal static class PolygonTests
         try
         {
             Geometry();
+            assertions += ConnectorRoutingTests.Run();
             if (args.Length > 0 && (args[0] == "--com" || args[0] == "--com-edges")) Com(args[0] == "--com-edges");
             Console.WriteLine("PASS " + assertions + " assertions"); return 0;
         }

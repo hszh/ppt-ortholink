@@ -45,7 +45,7 @@
           <separator id="olSep1"/>
           <box id="olBoxStyle" boxStyle="vertical">
             <comboBox id="olRadius" label="圆角" sizeString="99.9 pt" getText="GetRadiusText" onChange="OnRadiusChange" getEnabled="GetHasLink"
-                      screentip="选中连接线的圆角" supertip="只改当前选中的连接线。可以从列表里选，也可以直接输入数字（单位 pt），0 表示直角。">
+                      screentip="选中连接线的实际圆角" supertip="显示当前实际半径。输入值作为上限，空间不足时自动缩小，拉开后恢复到上限。单位 pt，0 表示直角。只改当前选中的连接线。">
               <item id="olR0" label="0"/>
               <item id="olR4" label="4"/>
               <item id="olR6" label="6"/>

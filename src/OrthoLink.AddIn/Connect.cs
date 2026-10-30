@@ -442,14 +442,17 @@ namespace OrthoLink
 
         private void Check()
         {
-            if (_app == null || !Settings.AutoFollow) return;
+            if (_app == null) return;
             if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0) return;   // another drag has begun; its release schedules a check
             if (_busy > 0) { ScheduleCheck(); return; }                   // one of our operations is running; look again after it
             _busy++;
             try
             {
                 var slide = CurrentSlide();
-                if (slide != null && _svc.Follow(slide) > 0) Refresh();
+                if (Settings.AutoFollow && slide != null && _svc.Follow(slide) > 0) Refresh();
+                // Yellow handles can change the effective radius without moving the connector's frame.
+                // Its geometry also updates when automatic following is disabled.
+                else if (_ribbon != null) _ribbon.InvalidateControl("olRadius");
             }
             catch (Exception ex)
             {

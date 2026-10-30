@@ -210,19 +210,48 @@ namespace OrthoLink
                 float x = Math.Abs(pa.X - xL) + Math.Abs(pb.X - xL) <= Math.Abs(pa.X - xR) + Math.Abs(pb.X - xR) ? xL : xR;
                 return new Route { Topo = "VHVHV", Params = new[] { y1, x, y2 } };
             }
+            // Short elbows are valid: the template shrinks their radius to fit the segments.
+            // Keep the requested end directions and clear both frames, including recessed outline ports.
+            var corner = hs ? new PointF(pb.X, pa.Y) : new PointF(pa.X, pb.Y);
+            float leaving = (corner.X - pa.X) * es.X + (corner.Y - pa.Y) * es.Y;
+            float entering = (corner.X - pb.X) * eo.X + (corner.Y - pb.Y) * eo.Y;
+            if (leaving > 0 && entering > 0 && OutsideSide(corner, ra, sa) && OutsideSide(corner, rb, sb))
+                return new Route { Topo = hs ? "HV" : "VH", Params = new float[0] };
+
             if (hs)
             {
-                if ((pb.X - pa.X) * es.X >= m && (pb.Y - pa.Y) * ed.Y >= m) return new Route { Topo = "HV", Params = new float[0] };
                 float x1 = es.X > 0 ? ra.Right + m : ra.Left - m;
                 float y1 = ed.Y > 0 ? rb.Top - m : rb.Bottom + m;
                 return new Route { Topo = "HVHV", Params = new[] { x1, y1 } };
             }
             {
-                if ((pb.Y - pa.Y) * es.Y >= m && (pb.X - pa.X) * ed.X >= m) return new Route { Topo = "VH", Params = new float[0] };
                 float y1 = es.Y > 0 ? ra.Bottom + m : ra.Top - m;
                 float x1 = ed.X > 0 ? rb.Left - m : rb.Right + m;
                 return new Route { Topo = "VHVH", Params = new[] { y1, x1 } };
             }
+        }
+
+        /// <summary>Actual radius used by the connector template: an interior segment serves two corners.</summary>
+        public static float EffectiveRadius(string topo, PointF start, PointF end, float[] interior, float requested)
+        {
+            float radius = requested;
+            var p = start;
+            for (int i = 0; i < topo.Length; i++)
+            {
+                bool horizontal = topo[i] == 'H';
+                float next = i < interior.Length ? interior[i] : horizontal ? end.X : end.Y;
+                float length = Math.Abs(next - (horizontal ? p.X : p.Y));
+                radius = Math.Min(radius, i > 0 && i < topo.Length - 1 ? length / 2 : length);
+                if (horizontal) p.X = next; else p.Y = next;
+            }
+            return Math.Max(0f, radius);
+        }
+
+        private static bool OutsideSide(PointF p, RectangleF box, Side side)
+        {
+            var edge = Port(box, side, 0.5f);
+            var outward = Outward(side);
+            return (p.X - edge.X) * outward.X + (p.Y - edge.Y) * outward.Y >= 0;
         }
 
         public static float Clamp(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
@@ -387,7 +416,19 @@ namespace OrthoLink
         }
 
         public void SetRadius(PowerPoint.Shape conn, float radiusPt) { conn.Adjustments[RadiusAdj] = radiusPt * AdjPerPt; }
-        public static float GetRadius(PowerPoint.Shape conn) { return conn.Adjustments[RadiusAdj] / AdjPerPt; }
+
+        /// <summary>Display the actual radius; keep the requested limit in the adjustment so it can recover on stretching.</summary>
+        public static float GetRadius(PowerPoint.Shape conn)
+        {
+            float requested = conn.Adjustments[RadiusAdj] / AdjPerPt;
+            var link = Link.Read(conn);
+            if (link == null || requested <= 0) return requested;
+            var box = Rect(conn);
+            PointF start, end;
+            Ends(box, conn.HorizontalFlip == Office.MsoTriState.msoTrue, conn.VerticalFlip == Office.MsoTriState.msoTrue,
+                 out start, out end);
+            return Geo.EffectiveRadius(link.Topo, start, end, ReadParams(conn, link.Topo, box), requested);
+        }
         public void SetArrowStart(PowerPoint.Shape conn, bool on) { conn.Line.BeginArrowheadStyle = on ? Office.MsoArrowheadStyle.msoArrowheadTriangle : Office.MsoArrowheadStyle.msoArrowheadNone; }
         public void SetArrowEnd(PowerPoint.Shape conn, bool on) { conn.Line.EndArrowheadStyle = on ? Office.MsoArrowheadStyle.msoArrowheadTriangle : Office.MsoArrowheadStyle.msoArrowheadNone; }
         public static bool GetArrowStart(PowerPoint.Shape conn) { return conn.Line.BeginArrowheadStyle != Office.MsoArrowheadStyle.msoArrowheadNone; }

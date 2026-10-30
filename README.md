@@ -130,6 +130,8 @@ register.cmd
 
 圆角回归测试：编译后运行 `tests\run.cmd` 检查纯几何和输入校验；运行 `tests\run.cmd --com` 在 PowerPoint 的独立测试文稿中检查各形状、旋转／翻转、样式、单选／多选、连接线、缩放及保存重开；`tests\run.cmd --com-edges` 检查动画、原生连接线、组合保护、文字自适应及撤销重做。测试只关闭自己创建的文稿，输出保存在 `build\polygon-tests\`。
 
+连接线实际半径回归：`tests\run.cmd --com-radius` 在独立文稿中检查拉近后半径缩小、拉远后恢复、黄色调节点、设定上限保留及保存重开。预览输出在 `build\connector-radius-probe\`。功能区“圆角”显示当前实际半径，输入值作为空间充足时恢复的上限。
+
 ## 许可
 
 MIT
